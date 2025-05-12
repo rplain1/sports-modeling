@@ -185,7 +185,10 @@ df_passer_effect = pl.from_pandas(
     + geom_density(alpha=0.2)
 )
 
+```
 
+
+```{python}
 df_passer_effect.group_by(["passer"]).agg(
     median=pl.col("passer_effect").median(),
     mean=pl.col("passer_effect").mean(),
@@ -205,7 +208,9 @@ ggplot(
     .assign(passer=lambda x: np.where(x["obs_id"] == 0, "J.Daniles", "C.Williams")),
     aes("mu", fill="factor(passer)"),
 ) + geom_density(alpha=0.2)
+```
 
+```{python}
 ggplot(
     pp.predictions["y_pred"]
     .to_dataframe()

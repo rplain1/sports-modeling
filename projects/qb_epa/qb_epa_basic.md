@@ -139,9 +139,9 @@ plot_priors(idata)
 ```
 
 
-        Prior median:      -0.05
-        Prior lower 2.5%:  -2.30
-        Prior upper 97.5%:  1.93
+        Prior median:      -0.06
+        Prior lower 2.5%:  -2.31
+        Prior upper 97.5%:  2.23
         
 
 ![](qb_epa_basic_files/figure-commonmark/cell-8-output-2.png)
@@ -156,7 +156,7 @@ with model:
     Initializing NUTS using jitter+adapt_diag...
     Multiprocess sampling (4 chains in 4 jobs)
     NUTS: [sigma, sigma_passer, passer_offset, y_pred]
-    Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 82 seconds.
+    Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 91 seconds.
     The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
 
     Output()
@@ -238,8 +238,11 @@ df_passer_effect = pl.from_pandas(
     ggplot(df_passer_effect, aes("passer_effect", fill="factor(passer)"))
     + geom_density(alpha=0.2)
 )
+```
 
+![](qb_epa_basic_files/figure-commonmark/cell-14-output-1.png)
 
+``` python
 df_passer_effect.group_by(["passer"]).agg(
     median=pl.col("passer_effect").median(),
     mean=pl.col("passer_effect").mean(),
@@ -276,7 +279,11 @@ ggplot(
     .assign(passer=lambda x: np.where(x["obs_id"] == 0, "J.Daniles", "C.Williams")),
     aes("mu", fill="factor(passer)"),
 ) + geom_density(alpha=0.2)
+```
 
+![](qb_epa_basic_files/figure-commonmark/cell-16-output-1.png)
+
+``` python
 ggplot(
     pp.predictions["y_pred"]
     .to_dataframe()
@@ -288,4 +295,4 @@ ggplot(
 ) + geom_density(alpha=0.2)
 ```
 
-![](qb_epa_basic_files/figure-commonmark/cell-15-output-1.png)
+![](qb_epa_basic_files/figure-commonmark/cell-17-output-1.png)
