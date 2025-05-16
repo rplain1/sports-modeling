@@ -23,20 +23,25 @@ rng = 527
 ### Load public data
 
 ```{python}
-qbs = (
-    pl.read_parquet(
-        "https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_2024.parquet"
+def get_data(year):
+    qbs = (
+        pl.read_parquet(
+            f"https://github.com/nflverse/nflverse-data/releases/download/pbp/play_by_play_{year}.parquet"
+        )
+        .filter(
+            (pl.col("wp").is_between(0.1, 0.9))
+            & (pl.col("penalty") == 0)
+            & (pl.col("qb_dropback") == 1)
+            & (pl.col("season_type") == "REG")
+        )
+        .with_columns(qb_dropbacks=pl.col("qb_dropback").sum().over(["passer_id"]))
+        #.filter(pl.col("qb_dropbacks") > 1)
+        #.select(["passer_id", "passer", "posteam", "complete_pass", "qb_epa", "qb_dropbacks"])
     )
-    .filter(
-        (pl.col("wp").is_between(0.1, 0.9))
-        & (pl.col("penalty") == 0)
-        & (pl.col("qb_dropback") == 1)
-        & (pl.col("season_type") == "REG")
-    )
-    .with_columns(qb_dropbacks=pl.col("qb_dropback").sum().over(["passer_id"]))
-    #.filter(pl.col("qb_dropbacks") > 1)
-    .select(["passer_id", "passer", "posteam", "complete_pass", "qb_epa", "qb_dropbacks"])
-)
+
+    return qbs
+
+qbs = pl.concat([get_data(year) for year in range(2021, 2025)])
 
 qb_ids = qbs["passer", "passer_id"].unique()
 
@@ -49,6 +54,8 @@ qbs.head()
 ggplot(qbs, aes("qb_epa")) + geom_density()
 print(f"Mean QB EPA/play: {qbs["qb_epa"].mean():.2f}")
 print(f"Mode QB EPA/play: {qbs["qb_epa"].round(1).mode()[0]:.2f}")
+print(f"Lower 2.5% QB EPA/play: {qbs["qb_epa"].quantile(0.025):.2f}")
+print(f"Upper 97.5% QB EPA/play: {qbs["qb_epa"].quantile(0.975):.2f}")
 ```
 
 
@@ -63,12 +70,13 @@ N_PASSERS = qbs["passer_id"].n_unique()
 
 ```{python}
 
-coords = {"passer_id": PASSER_ID, "n_passers": [N_PASSERS]}
+coords = {"passer_id": PASSER_ID, "obs_id": np.arange(len(PASSER_IDX))}
 
 with pm.Model(coords=coords) as model:
 
     # data
-    passer_idx_data = pm.Data("passer_idx", PASSER_IDX, dims="obs_id")
+    passer_idx_data = pm.Data("passer_idx", PASSER_IDX, dims='obs_id')
+    y_data = pm.Data("y_data", qbs["qb_epa"], dims='obs_id')
 
     # parameters
     sigma = pm.HalfNormal("sigma", sigma=0.5)
@@ -84,11 +92,18 @@ with pm.Model(coords=coords) as model:
     passer_effect = pm.Deterministic(
         "passer_effect", passer_offset * sigma_passer, dims="passer_id"
     )
-    mu = pm.Deterministic("mu", passer_effect[passer_idx_data], dims='obs_id')
+    mu = passer_effect[passer_idx_data]
 
     # Likelihood
-    y = pm.Normal("y", mu=mu, sigma=sigma, observed=qbs["qb_epa"])
-    y_pred = pm.Normal("y_pred", mu=mu, sigma=sigma, dims="obs_id")
+    y = pm.Normal(
+        "y",
+        mu=mu,
+        sigma=sigma,
+        observed=y_data,
+        shape=passer_idx_data.shape,
+        dims="obs_id",
+    )
+
 ```
 
 ### Prior predictive checks
@@ -144,41 +159,16 @@ az.plot_trace(
 
 
 ```{python}
-with model:
-    pm.sample_posterior_predictive(idata, extend_inferencedata=True)
+df_posterior = idata.posterior.to_dataframe().reset_index().merge(qb_ids.to_pandas(), on=['passer_id'], how='left')
 ```
-
-```{python}
-az.plot_ppc(idata, group='posterior', num_pp_samples=100)
-```
-
-
-```{python}
-with model:
-    pm.set_data({"passer_idx": [14, 96]}, coords={"passer_id":["00-0039910", "00-0039918"], "obs_id":[0, 1]})
-    #y_pred = pm.Normal("y_pred", mu=mu, sigma=sigma, shape=(2,))
-
-    pp = pm.sample_posterior_predictive(
-        idata,
-        predictions=True,
-        var_names=["mu", "y_pred"],
-        extend_inferencedata=False,
-    )
-```
-
 
 ```{python}
 
 _qbs = ["B.Nix", "J.Daniels", "C.Williams", "M.Penix"]
-_qb_ids = qb_ids.filter(pl.col("passer").is_in(_qbs))["passer_id"].to_list()
+#_qbs = ['P.Mahomes', 'C.Williams', 'J.Daniels', 'M.Penix', 'Z.Wilson']
 
-df_passer_effect = pl.from_pandas(
-    idata.posterior["passer_effect"]
-    .sel(passer_id=_qb_ids)
-    # .mean(dim='chain')
-    .to_dataframe()
-    .reset_index()
-).join(qb_ids, on="passer_id")
+
+df_passer_effect = df_posterior[df_posterior['passer'].isin(_qbs)]
 
 (
     ggplot(df_passer_effect, aes("passer_effect", fill="factor(passer)"))
@@ -189,36 +179,60 @@ df_passer_effect = pl.from_pandas(
 
 
 ```{python}
-df_passer_effect.group_by(["passer"]).agg(
+pl.from_pandas(df_passer_effect).group_by(["passer"]).agg(
     median=pl.col("passer_effect").median(),
     mean=pl.col("passer_effect").mean(),
     sd=pl.col("passer_effect").std(),
     lower=pl.col("passer_effect").quantile(0.075),
     upper=pl.col("passer_effect").quantile(0.975),
-).sort("mean")
+).sort("mean", descending=True)
+```
+
+
+```{python}
+with model:
+    pm.sample_posterior_predictive(idata, extend_inferencedata=True)
+```
+
+```{python}
+az.plot_ppc(idata, group='posterior', num_pp_samples=100)
 ```
 
 
 ```{python}
 
-ggplot(
-    pp.predictions["mu"]
-    .to_dataframe()
-    .reset_index()
-    .assign(passer=lambda x: np.where(x["obs_id"] == 0, "J.Daniles", "C.Williams")),
-    aes("mu", fill="factor(passer)"),
-) + geom_density(alpha=0.2)
+_qbs = (
+    qbs.with_columns(passer_idx=PASSER_IDX)
+    .filter(pl.col("passer").is_in(["J.Allen", "C.Williams"]))[
+        ["passer", "passer_id", "passer_idx"]
+    ]
+    .unique()
+    .to_pandas()
+)
+
+_passers = ["00-0039910", "00-0039918"]
+
+with model:
+    pm.set_data(
+        {"passer_idx": _qbs["passer_idx"]},
+        coords={"passer_id": _qbs["passer_id"], "obs_id": np.arange(_qbs.shape[0])},
+    )
+
+    pp = pm.sample_posterior_predictive(
+        idata,
+        predictions=True,
+        var_names=["y"],
+        extend_inferencedata=False,
+    )
+
+df_post_preds = pp.predictions["y"].assign_coords(
+    passer=("obs_id", _qbs['passer'])
+).to_dataframe().reset_index()
+
+
 ```
 
-```{python}
-ggplot(
-    pp.predictions["y_pred"]
-    .to_dataframe()
-    .reset_index()
-    .assign(
-        passer=lambda x: np.where(x["obs_id"] == 0, "J.Daniles", "C.Williams")
-    ),
-    aes("y_pred", fill="factor(passer)"),
-) + geom_density(alpha=0.2)
 
+```{python}
+(ggplot(df_post_preds, aes('y', fill='factor(passer)')) + geom_density(alpha = 0.2))
 ```
