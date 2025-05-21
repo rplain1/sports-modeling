@@ -1,0 +1,46 @@
+
+```{python}
+import numpy as np
+import pandas as pd
+import pymc as pm
+import xarray as xr
+import arviz as az
+from arviz.stats.stats import hdi
+from scipy import stats as stats
+from matplotlib import pyplot as plt
+import duckdb
+import polars as pl
+from plotnine import ggplot, aes, geom_density, geom_col
+conn = duckdb.connect()
+rng = 527
+```
+
+```{python}
+def get_player_data(season):
+    return (
+        pl.scan_parquet(
+            f"https://github.com/sportsdataverse/sportsdataverse-data/releases/download/espn_wnba_player_boxscores/player_box_{season}.parquet",
+        )
+        .filter(
+            (~pl.col("team_name").str.contains("Team"))
+            & (pl.col("season_type") == 2)  # regular season
+            & (pl.col("did_not_play") == False)
+        )
+        .collect()
+    )
+
+
+df = pl.concat([get_player_data(season) for season in range(2024, 2026)])
+```
+
+
+
+```{python}
+seasons = [2024, 2025]
+
+urls = [f"https://github.com/sportsdataverse/sportsdataverse-data/releases/download/espn_wnba_player_boxscores/player_box_{season}.parquet" for season in seasons
+]
+
+df = conn.read_parquet(urls)
+df = df.filter('season_type == 2')
+```
