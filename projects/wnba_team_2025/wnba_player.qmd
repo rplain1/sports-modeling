@@ -10,37 +10,112 @@ from scipy import stats as stats
 from matplotlib import pyplot as plt
 import duckdb
 import polars as pl
-from plotnine import ggplot, aes, geom_density, geom_col
-conn = duckdb.connect()
-rng = 527
+from plotnine import *
+conn = duckdb.connect('~/.db/belle.duckdb')
+rng = 8675309
 ```
 
 ```{python}
-def get_player_data(season):
-    return (
-        pl.scan_parquet(
-            f"https://github.com/sportsdataverse/sportsdataverse-data/releases/download/espn_wnba_player_boxscores/player_box_{season}.parquet",
-        )
-        .filter(
-            (~pl.col("team_name").str.contains("Team"))
-            & (pl.col("season_type") == 2)  # regular season
-            & (pl.col("did_not_play") == False)
-        )
-        .collect()
+df = (
+    conn.sql("from WNBA.TEAM_BOX").filter("season >= 2024 AND season_type = 'REG'").df()
+)
+
+team_box = conn.table("WNBA.TEAM_BOX").set_alias("box")
+team_possessions = conn.table("WNBA.TEAM_POSSESSIONS").set_alias("pos")
+
+df = (
+    team_box.filter("season >= 2024 AND season_type = 'REG'")
+    .join(
+        team_possessions.select("game_id, season, team_id, possessions"),
+        condition="box.game_id = pos.game_id and box.season = pos.season and box.team_id = pos.team_id",
+        how="left",
+    )
+    .df()
+)
+```
+
+```{python}
+ggplot(df, aes("possessions", "team_score")) + geom_point() + facet_wrap("~team_name")
+ggplot(df, aes("possessions")) + geom_density(aes(color='factor(team_name)'))
+
+```
+
+
+```{python}
+# categorical to int indexes for pymc
+TEAM_IDX, TEAM_NAME = pd.factorize(df["team_name"], sort=True)
+N_TEAMS = len(TEAM_NAME)
+
+```
+
+### Configure Model
+
+```{python}
+
+coords = {"team_name": TEAM_NAME, "obs_id": np.arange(len(TEAM_IDX))}
+
+with pm.Model(coords=coords) as model:
+
+    # data
+    team_idx_data = pm.Data("team_idx", TEAM_IDX, dims="obs_id")
+    y_data = pm.Data("y_data", df["team_score"], dims="obs_id")
+
+    # parameters
+    alpha = pm.Normal("alpha", mu=80, sigma=10)
+    sigma = pm.HalfNormal("sigma", sigma=1)
+    sigma_team = pm.HalfNormal("sigma_team", sigma=1)
+    team_offset = pm.Normal(
+        "team_offset",
+        mu=0,
+        sigma=1,
+        dims="team_name",
     )
 
+    # generated quantities
+    team_effect = pm.Deterministic(
+        "team_effect", team_offset * sigma_team, dims="team_name"
+    )
+    mu = alpha + team_effect[team_idx_data]
 
-df = pl.concat([get_player_data(season) for season in range(2024, 2026)])
+    # Likelihood
+    y = pm.Normal(
+        "y",
+        mu=mu,
+        sigma=sigma,
+        observed=y_data,
+        shape=team_idx_data.shape,
+        dims="obs_id",
+    )
+
+    idata = pm.sample_prior_predictive()
+
 ```
 
 
 
 ```{python}
-seasons = [2024, 2025]
+az.plot_ppc(idata, group='prior', num_pp_samples=100)
+```
 
-urls = [f"https://github.com/sportsdataverse/sportsdataverse-data/releases/download/espn_wnba_player_boxscores/player_box_{season}.parquet" for season in seasons
-]
 
-df = conn.read_parquet(urls)
-df = df.filter('season_type == 2')
+```{python}
+with model:
+    idata.extend(pm.sample(random_seed=rng))
+```
+
+
+```{python}
+az.summary(idata.posterior)
+az.plot_forest(
+    idata.posterior, var_names=["~sigma", "~alpha", "~team_effect"], combined=True
+)
+az.plot_forest(
+    idata.posterior, var_names=["~sigma", "~alpha", "~team_offset"], combined=True
+)
+
+```
+
+
+```{python}
+idata.posterior
 ```

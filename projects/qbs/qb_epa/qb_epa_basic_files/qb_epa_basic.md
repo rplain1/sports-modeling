@@ -155,9 +155,9 @@ plot_priors(idata)
 ```
 
 
-        Prior median:      -0.06
-        Prior lower 2.5%:  -2.23
-        Prior upper 97.5%:  2.03
+        Prior median:      -0.05
+        Prior lower 2.5%:  -2.40
+        Prior upper 97.5%:  2.20
         
 
 ![](qb_epa_basic_files/figure-commonmark/cell-8-output-2.png)
@@ -172,7 +172,7 @@ with model:
     Initializing NUTS using jitter+adapt_diag...
     Multiprocess sampling (4 chains in 4 jobs)
     NUTS: [sigma, sigma_passer, passer_offset]
-    Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 71 seconds.
+    Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 70 seconds.
 
     Output()
 
