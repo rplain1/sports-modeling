@@ -81,8 +81,9 @@ with pm.Model(coords=coords) as model:
     # parameters
     sigma = pm.HalfNormal("sigma", sigma=0.5)
     sigma_passer = pm.HalfNormal("sigma_passer", sigma=0.5)
-    passer_offset = pm.Normal(
+    passer_offset = pm.StudentT(
         "passer_offset",
+        nu=3,
         mu=-0.2,
         sigma=1,
         dims="passer_id",
@@ -165,7 +166,7 @@ df_posterior = idata.posterior.to_dataframe().reset_index().merge(qb_ids.to_pand
 ```{python}
 
 _qbs = ["B.Nix", "J.Daniels", "C.Williams", "M.Penix"]
-#_qbs = ['P.Mahomes', 'C.Williams', 'J.Daniels', 'M.Penix', 'Z.Wilson']
+_qbs = ['P.Mahomes', 'C.Williams', 'J.Daniels', 'M.Penix', 'Z.Wilson']
 
 
 df_passer_effect = df_posterior[df_posterior['passer'].isin(_qbs)]

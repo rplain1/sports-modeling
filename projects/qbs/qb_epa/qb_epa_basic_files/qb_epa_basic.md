@@ -97,8 +97,9 @@ with pm.Model(coords=coords) as model:
     # parameters
     sigma = pm.HalfNormal("sigma", sigma=0.5)
     sigma_passer = pm.HalfNormal("sigma_passer", sigma=0.5)
-    passer_offset = pm.Normal(
+    passer_offset = pm.StudentT(
         "passer_offset",
+        nu=3,
         mu=-0.2,
         sigma=1,
         dims="passer_id",
@@ -156,8 +157,8 @@ plot_priors(idata)
 
 
         Prior median:      -0.05
-        Prior lower 2.5%:  -2.40
-        Prior upper 97.5%:  2.20
+        Prior lower 2.5%:  -2.79
+        Prior upper 97.5%:  2.64
         
 
 ![](qb_epa_basic_files/figure-commonmark/cell-8-output-2.png)
@@ -172,7 +173,9 @@ with model:
     Initializing NUTS using jitter+adapt_diag...
     Multiprocess sampling (4 chains in 4 jobs)
     NUTS: [sigma, sigma_passer, passer_offset]
-    Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 70 seconds.
+    Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 189 seconds.
+    The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+    The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
 
     Output()
 
@@ -205,7 +208,7 @@ df_posterior = idata.posterior.to_dataframe().reset_index().merge(qb_ids.to_pand
 
 ``` python
 _qbs = ["B.Nix", "J.Daniels", "C.Williams", "M.Penix"]
-#_qbs = ['P.Mahomes', 'C.Williams', 'J.Daniels', 'M.Penix', 'Z.Wilson']
+_qbs = ['P.Mahomes', 'C.Williams', 'J.Daniels', 'M.Penix', 'Z.Wilson']
 
 
 df_passer_effect = df_posterior[df_posterior['passer'].isin(_qbs)]
@@ -235,15 +238,16 @@ pl.from_pandas(df_passer_effect).group_by(["passer"]).agg(
   white-space: pre-wrap;
 }
 </style>
-<small>shape: (4, 6)</small>
+<small>shape: (5, 6)</small>
 
-| passer       | median    | mean      | sd       | lower     | upper    |
-|--------------|-----------|-----------|----------|-----------|----------|
-| str          | f64       | f64       | f64      | f64       | f64      |
-| "J.Daniels"  | 0.070669  | 0.070105  | 0.06568  | -0.0222   | 0.198537 |
-| "B.Nix"      | 0.026895  | 0.027941  | 0.061208 | -0.061506 | 0.147177 |
-| "M.Penix"    | -0.008801 | -0.009233 | 0.096385 | -0.150668 | 0.179406 |
-| "C.Williams" | -0.093416 | -0.093161 | 0.061802 | -0.182682 | 0.024733 |
+| passer       | median    | mean      | sd       | lower     | upper     |
+|--------------|-----------|-----------|----------|-----------|-----------|
+| str          | f64       | f64       | f64      | f64       | f64       |
+| "P.Mahomes"  | 0.209872  | 0.209841  | 0.032279 | 0.162782  | 0.271996  |
+| "J.Daniels"  | 0.063571  | 0.065889  | 0.063851 | -0.02134  | 0.198155  |
+| "M.Penix"    | -0.011437 | -0.009045 | 0.093743 | -0.140407 | 0.191766  |
+| "C.Williams" | -0.084423 | -0.085925 | 0.05968  | -0.17104  | 0.02654   |
+| "Z.Wilson"   | -0.131937 | -0.132552 | 0.048175 | -0.2044   | -0.040123 |
 
 </div>
 
