@@ -1,0 +1,222 @@
+
+```{python}
+import pymc as pm
+import numpy as np
+import arviz as az
+import polars as pl
+import duckdb
+con = duckdb.connect('~/.db/luna.duckdb')
+```
+
+
+```{python}
+df = (
+    con.sql(
+        """
+        select *
+        , case when posteam = home_team then home_coach else away_coach end as head_coach
+        , case when roof in ('closed', 'dome') then 1 else 0 end as dome
+        , case when posteam = home_team then 1 else 0 end home
+        , case when qb_dropback = 1  then 1 else 0 end pass
+        from base.nflfastr_pbp
+        """
+    )
+    .filter("season >= 2024 and week < 17")
+    .filter("yardline_100 is not null and play = 1 and special = 0")
+    .select(
+        "game_id, pass, home, posteam, passer_id, head_coach, qtr, wp, vegas_wp, down, ydstogo, dome, score_differential, half_seconds_remaining"
+    )
+    .pl()
+    .with_columns(
+        pl.col("posteam").cast(pl.Categorical),
+        pl.col("passer_id").cast(pl.Categorical),
+        pl.col("head_coach").cast(pl.Categorical),
+        pl.col('pass').cast(pl.Int8)
+    )
+    .sample(5000)
+)
+df.shape
+```
+
+### Featureless model
+
+```{python}
+with pm.Model() as base_model:
+
+    alpha = pm.Normal("alpha", mu=0.2, sigma=0.1)
+    sigma = pm.Exponential("sigma", 1)
+
+    p = pm.Deterministic("p", pm.math.invlogit(alpha))
+    y = pm.Binomial("y", n=1, p=p, observed=df["pass"])
+
+    idata = pm.sample_prior_predictive()
+    idata.extend(pm.sample())
+    idata.extend(pm.sample_posterior_predictive(idata))
+    #pm.compute_log_likelihood(idata)
+```
+
+```{python}
+az.plot_trace(idata)
+az.plot_ppc(idata, group='posterior', num_pp_samples=100)
+```
+
+
+```{python}
+az.plot_ppc(idata, group = 'posterior', num_pp_samples=100)
+```
+
+### Head Coach Model
+
+```{python}
+head_coach = df["head_coach"].to_physical().to_numpy()
+
+with pm.Model(coords={"coach": df["head_coach"].cat.get_categories()}) as coach_model:
+    coach = pm.Data("coach", head_coach)
+
+    alpha = pm.Normal("alpha", mu=60, sigma=5)
+
+    coach_offset = pm.Normal("coach_offset", mu=0, sigma=0.5, dims="coach")
+    sigma_coach = pm.HalfNormal("sigma_coach", sigma=0.5, dims="coach")
+    coach_effect = coach_offset * sigma_coach
+
+    mu = alpha + coach_effect[head_coach]
+    sigma = pm.Exponential("sigma", 1)
+
+    y = pm.Normal("y", mu=mu, sigma=sigma, observed=df["plays"])
+
+    idata_coach = pm.sample_prior_predictive()
+    idata_coach.extend(pm.sample())
+    idata_coach.extend(pm.sample_posterior_predictive(idata_coach))
+    pm.compute_log_likelihood(idata_coach)
+```
+
+```{python}
+az.plot_trace(idata_coach)
+```
+
+### From claude ---
+
+
+```{python}
+
+df = (
+    con.sql("from summary.play_counts")
+    .filter("season >= 2023 and week < 17")
+    .df()
+    .with_columns(
+        pl.col("posteam").cast(pl.Categorical),
+        pl.col("passer_id").cast(pl.Categorical),
+        pl.col("head_coach").cast(pl.Categorical),
+    )
+)
+
+_head_coach = df["head_coach"].to_physical().to_numpy()
+_passer_id = df["passer_id"].to_physical().to_numpy()
+
+import pandas as pd
+df = (
+    con.sql("from summary.play_counts")
+    .filter("season >= 2023 and week < 17")
+    .df()
+    .assign(
+        head_coach=lambda x: x["head_coach"].astype("category"),
+        passer_id=lambda x: x["passer_id"].astype("category"),
+    )
+)
+
+```
+
+
+```{python}
+with pm.Model(
+    coords={
+        "coach": df["head_coach"].cat.categories,
+        "passer_id": df["passer_id"].cat.categories,
+        "obs_id": np.arange(df.shape[0])
+        #'features': ['coach', 'passer_id']
+    }
+) as joint_model:
+
+    coach_idx = pm.Data("coach", df['head_coach'].cat.codes, dims='obs_id')
+    passer_idx = pm.Data("passer_id", df['passer_id'].cat.codes, dims='obs_id')
+    #plays_data = pm.Data('plays_data', df['plays'].astype(int), dims='obs_id')
+
+    # === TOTAL PLAYS MODEL ===
+    alpha_plays = pm.Normal("alpha_plays", mu=60, sigma=5)
+    coach_offset_plays = pm.Normal("coach_offset_plays", mu=0, sigma=0.5, dims="coach")
+    sigma_coach_plays = pm.HalfNormal("sigma_coach_plays", sigma=0.5, dims="coach")
+    coach_effect_plays = coach_offset_plays * sigma_coach_plays
+
+    mu_plays = (
+        alpha_plays + coach_effect_plays[coach_idx]
+    )
+    sigma_plays = pm.Exponential("sigma_plays", 1)
+
+    total_plays = pm.Normal(
+        "total_plays",
+        mu=mu_plays,
+        sigma=sigma_plays,
+        observed=df['plays'].astype(int),
+        dims="obs_id",
+    )
+
+    # === PASS PROBABILITY MODEL ===
+    alpha_pass = pm.Normal("alpha_pass", mu=0.2, sigma=0.1)
+
+    coach_offset_pass = pm.Normal("coach_offset_pass", mu=0, sigma=0.5, dims="coach")
+    sigma_coach_pass = pm.HalfNormal("sigma_coach_pass", sigma=0.5, dims="coach")
+    coach_effect_pass = coach_offset_pass * sigma_coach_pass
+
+    passer_offset = pm.Normal("passer_offset", mu=0, sigma=0.5, dims="passer_id")
+    sigma_passer = pm.HalfNormal("sigma_passer", sigma=0.5, dims="passer_id")
+    passer_effect = passer_offset * sigma_passer
+
+    interaction_effect = pm.Normal(
+        "interaction", mu=0, sigma=0.5, dims=("passer_id", "coach")
+    )
+
+    logit_p = (
+        alpha_pass
+        + coach_effect_pass[coach_idx]
+        + passer_effect[passer_idx]
+        + interaction_effect[passer_idx, coach_idx]
+    )
+
+    pass_prob = pm.Deterministic("pass_prob", pm.math.invlogit(logit_p))
+
+    # === PASSES (constrained by total plays) ===
+    passes = pm.Binomial(
+        "passes",
+        n=total_plays.astype(int),
+        p=pass_prob,
+        observed=df["passes"].to_numpy(),
+        dims='obs_id'
+    )
+
+    idata = pm.sample_prior_predictive()
+    idata.extend(pm.sample(target_accept=0.8))
+    idata.extend(pm.sample_posterior_predictive(idata))
+```
+
+
+```{python}
+with joint_model:
+    pm.set_data(
+        {
+            "coach": np.array([0, 1]),
+            "passer_id": np.array([26, 9]),
+        },
+         coords = {
+             'obs_id': np.array(['mahomes_reid', 'tannehil_pierce'])
+         }
+    )
+    pp = pm.sample_posterior_predictive(idata, predictions=True, var_names=['total_plays', 'passes'])
+```
+
+
+```{python}
+ggplot(
+    pp.predictions.to_dataframe().reset_index(),
+    aes('passes', fill='obs_id', alpha = 0.4)
+) + geom_density(alpha = 0.4)
+```

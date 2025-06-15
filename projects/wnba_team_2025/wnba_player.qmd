@@ -17,14 +17,14 @@ rng = 8675309
 
 ```{python}
 df = (
-    conn.sql("from WNBA.TEAM_BOX").filter("season >= 2024 AND season_type = 'REG'").df()
+    conn.sql("from WNBA.TEAM_BOX").filter("season >= 2025 AND season_type = 'REG'").df()
 )
 
 team_box = conn.table("WNBA.TEAM_BOX").set_alias("box")
 team_possessions = conn.table("WNBA.TEAM_POSSESSIONS").set_alias("pos")
 
 df = (
-    team_box.filter("season >= 2024 AND season_type = 'REG'")
+    team_box.filter("season >= 2025 AND season_type = 'REG'")
     .join(
         team_possessions.select("game_id, season, team_id, possessions"),
         condition="box.game_id = pos.game_id and box.season = pos.season and box.team_id = pos.team_id",
@@ -107,15 +107,15 @@ with model:
 ```{python}
 az.summary(idata.posterior)
 az.plot_forest(
-    idata.posterior, var_names=["~sigma", "~alpha", "~team_effect"], combined=True
-)
-az.plot_forest(
-    idata.posterior, var_names=["~sigma", "~alpha", "~team_offset"], combined=True
+    idata.posterior, var_names=["~sigma", "~alpha", "~team_effect", "~sigma_team"], combined=True
 )
 
 ```
 
 
 ```{python}
-idata.posterior
+with model:
+    idata.extend(pm.sample_posterior_predictive(idata))
+
+az.plot_ppc(idata, group='posterior', num_pp_samples=100)
 ```

@@ -1,0 +1,49 @@
+
+```{r}
+library(tidyverse)
+library(cmdstanr)
+```
+
+
+```{r}
+con <- blitz::connect()
+
+blitz::tblx(base, nflfastr_pbp) |>
+    filter(between(wp, 0.1, 0.9), penalty == 0, qb_dropback == 1, season_type =='REG') |>
+    filter(season == 2024) |>
+    select(passer_id, passer, posteam, complete_pass, qb_epa, qb_dropback) |>
+    collect() |>
+    group_by(passer_id) |>
+    mutate(qb_dropbacks = sum(qb_dropback)) |>
+    ungroup() |>
+    filter(qb_dropbacks > 10) -> df
+
+```
+
+
+```{r}
+df
+
+passers <- df$passer_id
+passer_idx <- factor(passers)
+
+
+qb_data_list <- list(
+    N = nrow(df),
+    n_passers = length(unique(df$passer_id)),
+    passer_idx = as.integer(passer_idx),
+    y = df$qb_epa
+)
+
+```
+
+
+```{r}
+fit_qb <- mod$sample(
+  data = qb_data_list,
+  seed = 123,
+  chains = 4,
+  parallel_chains = 4,
+  refresh = 500 # print update every 500 iters
+)
+```

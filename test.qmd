@@ -1,0 +1,82 @@
+
+```{r}
+library(cmdstanr)
+library(tidybayes)
+
+mod <- cmdstan_model('test.stan')
+```
+
+
+```{r}
+mod$print()
+mod$exe_file()
+```
+
+
+```{r}
+# names correspond to the data block in the Stan program
+data_list <- list(N = 10, y = c(0, 1, 0, 0, 0, 0, 0, 0, 0, 1))
+
+fit <- mod$sample(
+  data = data_list,
+  seed = 123,
+  chains = 4,
+  parallel_chains = 4,
+  refresh = 500 # print update every 500 iters
+)
+```
+
+
+```{r}
+fit$summary()
+fit$summary(variables = c("theta", "lp__"), "mean", "sd")
+
+# use a formula to summarize arbitrary functions, e.g. Pr(theta <= 0.5)
+fit$summary("theta", pr_lt_half = ~ mean(. <= 0.5))
+
+# summarise all variables with default and additional summary measures
+fit$summary(
+  variables = NULL,
+  posterior::default_summary_measures(),
+  extra_quantiles = ~ posterior::quantile2(., probs = c(.0275, .975))
+)
+```
+
+## converting to dataframe
+
+```{r}
+fit$draws(format = 'df') |> tibble::as_tibble()
+#or
+fit |>
+    posterior::as_draws_df() |>
+    tibble::as_tibble() |>
+    select(-starts_with('y_rep'))
+```
+
+
+
+```{r}
+predict(fit, newdata = c(1, 1))
+
+fit$draws("y_rep", format = 'df') |>
+    as_tibble()
+
+bayesplot::pp_check(fit, fit$draws("y_rep"))
+
+```
+
+```{r}
+pp_check_cmdstanr <- function(fit, y, var = "y_rep", draws = 100) {
+  yrep <- fit$draws(var)
+  yrep_mat <- posterior::as_draws_matrix(yrep)[1:draws, ]
+  bayesplot::ppc_dens_overlay(y = y, yrep = yrep_mat)
+}
+
+```
+
+
+```{r}
+yrep <- posterior::as_draws_matrix(fit$draws("y_rep"))
+
+bayesplot::ppc_dens_overlay(y = data_list$y, yrep[10:110, ])
+```

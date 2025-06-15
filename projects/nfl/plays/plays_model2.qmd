@@ -1,0 +1,213 @@
+
+```{python}
+import pymc as pm
+import pandas as pd
+import arviz as az
+import polars as pl
+import duckdb
+con = duckdb.connect('~/.db/luna.duckdb')
+```
+
+
+```{python}
+df = (
+    con.sql("from summary.play_counts")
+    .filter('season >= 2022 and week < 17')
+    .pl()
+    .with_columns(
+        pl.col("posteam").cast(pl.Categorical),
+        pl.col("passer_id").cast(pl.Categorical),
+        pl.col("head_coach").cast(pl.Categorical),
+    )
+)
+```
+
+### Featureless model
+
+```{python}
+with pm.Model() as base_model:
+
+    alpha = pm.Normal('alpha', mu = 60, sigma = 5)
+    sigma = pm.Exponential('sigma', 1)
+
+    y = pm.Normal('y', mu=alpha, sigma = sigma, observed=df['plays'])
+
+    idata = pm.sample_prior_predictive()
+    idata.extend(pm.sample())
+    idata.extend(pm.sample_posterior_predictive(idata))
+    pm.compute_log_likelihood(idata)
+```
+
+
+```{python}
+az.plot_ppc(idata, group = 'posterior', num_pp_samples=100)
+```
+
+### Head Coach Model
+
+```{python}
+head_coach = df["head_coach"].to_physical().to_numpy()
+
+with pm.Model(coords={"coach": df["head_coach"].cat.get_categories()}) as coach_model:
+    coach = pm.Data("coach", head_coach)
+
+    alpha = pm.Normal("alpha", mu=60, sigma=5)
+
+    coach_offset = pm.Normal("coach_offset", mu=0, sigma=0.5, dims="coach")
+    sigma_coach = pm.HalfNormal("sigma_coach", sigma=0.5, dims="coach")
+    coach_effect = coach_offset * sigma_coach
+
+    mu = alpha + coach_effect[head_coach]
+    sigma = pm.Exponential("sigma", 1)
+
+    y = pm.Normal("y", mu=mu, sigma=sigma, observed=df["plays"])
+
+    idata_coach = pm.sample_prior_predictive()
+    idata_coach.extend(pm.sample())
+    idata_coach.extend(pm.sample_posterior_predictive(idata_coach))
+    pm.compute_log_likelihood(idata_coach)
+```
+
+```{python}
+az.plot_trace(idata_coach)
+```
+
+### Passer Model
+
+```{python}
+passer_id = df["passer_id"].to_physical().to_numpy()
+
+with pm.Model(coords={"passer_id": df["passer_id"].cat.get_categories()}) as passer_model:
+    passer_id = pm.Data("passer_id", passer_id)
+
+    alpha = pm.Normal("alpha", mu=60, sigma=5)
+
+    passer_offset = pm.Normal("passer_offset", mu=0, sigma=0.5, dims="passer_id")
+    sigma_passer = pm.HalfNormal("sigma_passer", sigma=0.5, dims="passer_id")
+    passer_effect = passer_offset * sigma_passer
+
+    mu = alpha + passer_effect[passer_id]
+    sigma = pm.Exponential("sigma", 1)
+
+    y = pm.Normal("y", mu=mu, sigma=sigma, observed=df["plays"])
+
+    idata_passer = pm.sample_prior_predictive()
+    idata_passer.extend(pm.sample())
+    idata_passer.extend(pm.sample_posterior_predictive(idata_passer))
+    pm.compute_log_likelihood(idata_passer)
+```
+
+```{python}
+az.plot_trace(idata_passer)
+```
+
+### Hiearcacal  Model
+
+```{python}
+passer_id = df["passer_id"].to_physical().to_numpy()
+head_coach = df["head_coach"].to_physical().to_numpy()
+
+with pm.Model(
+    coords={
+        "passer_id": df["passer_id"].cat.get_categories(),
+        "head_coach": df["head_coach"].cat.get_categories(),
+    }
+) as coach_passer_model:
+    passer_id = pm.Data("passer_id", passer_id, coords="passer_id")
+    head_coach = pm.Data("head_coach", head_coach, coords="head_coach")
+
+    alpha = pm.Normal("alpha", mu=60, sigma=5)
+
+    passer_offset = pm.Normal("passer_offset", mu=0, sigma=0.5, dims="passer_id")
+    sigma_passer = pm.HalfNormal("sigma_passer", sigma=0.5, dims="passer_id")
+    passer_effect = passer_offset * sigma_passer
+
+    head_coach_offset = pm.Normal(
+        "head_coach_offset", mu=0, sigma=0.5, dims="head_coach"
+    )
+    sigma_head_coach = pm.HalfNormal("sigma_head_coach", sigma=0.5, dims="head_coach")
+    head_coach_effect = head_coach_offset * sigma_head_coach
+
+    mu = alpha + passer_effect[passer_id] + head_coach_effect[head_coach]
+    sigma = pm.Exponential("sigma", 1)
+
+    y = pm.Normal("y", mu=mu, sigma=sigma, observed=df["plays"])
+
+    idata_coach_passer = pm.sample_prior_predictive()
+    idata_coach_passer.extend(pm.sample())
+    # idata_coach_passer.extend(pm.sample_posterior_predictive(idata_coach_passer))
+    pm.compute_log_likelihood(idata_coach_passer)
+```
+
+
+### Interaction Model
+
+```{python}
+passer_id = df["passer_id"].to_physical().to_numpy()
+head_coach = df["head_coach"].to_physical().to_numpy()
+
+with pm.Model(
+    coords={
+        "passer_id": df["passer_id"].cat.get_categories(),
+        "head_coach": df["head_coach"].cat.get_categories(),
+    }
+) as interaction_model:
+    passer_id = pm.Data("passer_id", passer_id, coords="passer_id")
+    head_coach = pm.Data("head_coach", head_coach, coords="head_coach")
+
+    alpha = pm.Normal("alpha", mu=60, sigma=5)
+
+    passer_offset = pm.Normal("passer_offset", mu=0, sigma=0.5, dims="passer_id")
+    sigma_passer = pm.HalfNormal("sigma_passer", sigma=0.5, dims="passer_id")
+    passer_effect = passer_offset * sigma_passer
+
+    head_coach_offset = pm.Normal(
+        "head_coach_offset", mu=0, sigma=0.5, dims="head_coach"
+    )
+    sigma_head_coach = pm.HalfNormal("sigma_head_coach", sigma=0.5, dims="head_coach")
+    head_coach_effect = head_coach_offset * sigma_head_coach
+
+    interaction_effect = pm.Normal(
+        "interaction", mu=0, sigma=0.5, dims=("passer_id", "head_coach")
+    )
+
+    mu = (
+        alpha
+        + passer_effect[passer_id]
+        + head_coach_effect[head_coach]
+        + interaction_effect[passer_id, head_coach]
+    )
+    sigma = pm.Exponential("sigma", 1)
+
+    y = pm.Normal("y", mu=mu, sigma=sigma, observed=df["plays"])
+
+    idata_interaction = pm.sample_prior_predictive()
+    idata_interaction.extend(pm.sample())
+    # idata_interaction.extend(pm.sample_posterior_predictive(idata_interaction))
+    pm.compute_log_likelihood(idata_interaction)
+```
+
+```{python}
+
+df_interaction = pl.from_pandas(idata_interaction.posterior[['interaction']].to_dataframe().reset_index()).join(
+    df[["passer", "passer_id"]]
+    .unique()
+    .with_columns(pl.col("passer_id").cast(pl.Utf8)),
+    on="passer_id",
+)
+
+df_interaction_aggg = df_interaction.group_by(["head_coach", "passer"]).agg(
+    med_value=pl.col("interaction").median(),
+    lower=pl.col("interaction").quantile(0.025),
+    upper=pl.col("interaction").quantile(0.975),
+).sort(
+    "med_value", descending=True
+)
+```
+
+```{python}
+
+az.compare({'base': idata, 'coach': idata_coach, 'passer': idata_passer, 'mix': idata_coach_passer, 'interaction': idata_interaction})
+```
+
+The interaction model performed the best, but the base model can almost model the plays alone. It is probably best to just use a coach component and keep it lightweight.

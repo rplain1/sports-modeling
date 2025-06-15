@@ -1,0 +1,257 @@
+
+```{python}
+import numpy as np
+import pandas as pd
+import pymc as pm
+import xarray as xr
+import arviz as az
+from arviz.stats.stats import hdi
+from scipy import stats as stats
+from matplotlib import pyplot as plt
+import duckdb
+import polars as pl
+from plotnine import *
+
+conn = duckdb.connect("~/.db/belle.duckdb")
+rng = 8675309
+```
+
+```{python}
+df = conn.sql(
+    """
+    select
+        game_date
+        , home_id
+        , home_name
+        , away_id
+        , away_name
+        , home_score
+        , away_score
+        , case when home_score > away_score then 1 else 0 end as outcome
+    from wnba.schedule
+    where year(game_date) = 2025
+    and season_type = 2
+    and home_id > 0
+    and home_score > 0
+    and home_id not in (96, 97)
+    """
+    ).df()
+```
+
+```{python}
+# df = conn.sql("from WNBA.TEAM_BOX").filter("season = 2024 AND season_type = 'REG'").df()
+
+HOME_TEAM_IDX, HOME_TEAM_NAME = pd.factorize(df["home_name"], sort=True)
+AWAY_TEAM_IDX, AWAY_TEAM_NAME = pd.factorize(df["away_name"], sort=True)
+
+TEAM_IDX, TEAM_NAME = pd.factorize(
+    pd.concat([df["home_name"], df["away_name"]], ignore_index=True).unique(), sort=True
+)
+N_TEAMS = len(TEAM_NAME)
+
+```
+
+
+```{python}
+
+coords = {
+    "obs_id": np.arange(len(HOME_TEAM_IDX)),
+    "home_team_name": HOME_TEAM_NAME,
+    "away_team_name": AWAY_TEAM_NAME,
+    "team_name": TEAM_NAME
+}
+
+with pm.Model() as elo_model:
+
+    home_team = pm.Data("home_team", HOME_TEAM_IDX, dims=("home_team_name"))
+    away_team = pm.Data("away_team", AWAY_TEAM_IDX, dims="away_team_name")
+    outcome = pm.Data("outcome", df["outcome"].values, dims='obs_id')
+
+    elo_rating = pm.Normal("elo_rating", mu=1500, sigma=50, shape=N_TEAMS, dims='team_name')
+    home_adv = pm.Normal("home_adv", mu=50, sigma=25)
+    K = pm.Normal("K", mu=50, sigma=25)
+
+    rating_diff = elo_rating[away_team] - (elo_rating[home_team] + home_adv)
+    p = 1 / (1 + 10 ** (rating_diff / 400))
+    y = pm.Bernoulli( "y", p=p, observed=outcome, shape=home_team.shape[0], dims='obs_id')
+
+    idata = pm.sample()
+```
+
+
+
+```{python}
+
+
+df_post = (
+    idata["posterior"]["elo_rating"]
+    .to_dataframe()
+    .reset_index()
+    .assign(team_name=lambda x: TEAM_NAME[x.team_name])
+)
+
+
+df_post.groupby("team_name").agg(
+    elo_mean=("elo_rating", "mean"),
+    hdi_3=("elo_rating", lambda x: np.quantile(x, 0.03)),
+    hdi_97=("elo_rating", lambda x: np.quantile(x, 0.97))
+).sort_values('elo_mean', ascending=False)
+
+
+df_post
+```
+
+
+
+
+```{python}
+import numpy as np
+
+
+def compute_elo_updates_vectorized(
+    posterior_samples, home_team_idx, away_team_idx, outcomes, N_TEAMS
+):
+    """
+    Vectorized computation of sequential Elo rating updates from posterior samples.
+
+    Parameters:
+    - posterior_samples: dict with keys 'elo_rating', 'home_adv', 'K'
+      'elo_rating': (n_samples, N_TEAMS)
+      'home_adv': (n_samples,)
+      'K': (n_samples,)
+    - home_team_idx, away_team_idx: arrays, length N_games
+    - outcomes: array, length N_games
+    - N_TEAMS: int, number of teams
+
+    Returns:
+    - new_ratings: (n_samples, N_TEAMS) final ratings after all updates
+    - rating_changes: (n_samples, N_games) rating changes per game
+    """
+
+    n_samples = posterior_samples["elo_rating"].shape[0]
+    N_games = len(home_team_idx)
+
+    # Initialize rating arrays: (n_samples, N_TEAMS)
+    ratings = posterior_samples["elo_rating"].copy()
+
+    rating_changes = np.empty((n_samples, N_games))
+
+    # For each game sequentially update ratings
+    for n in range(N_games):
+        home_idx = home_team_idx[n]
+        away_idx = away_team_idx[n]
+
+        # Compute rating difference for all samples at once
+        rating_diff = ratings[:, away_idx] - (
+            ratings[:, home_idx] + posterior_samples["home_adv"]
+        )
+
+        # Compute win probability (home team)
+        prob = 1 / (1 + 10 ** (rating_diff / 400))
+
+        # Compute rating change delta (vectorized over samples)
+        delta = posterior_samples["K"] * (outcomes[n] - prob)
+
+        # Apply rating change incrementally
+        ratings[:, home_idx] += delta
+        ratings[:, away_idx] -= delta
+
+        rating_changes[:, n] = delta
+
+    return ratings, rating_changes
+
+```
+
+
+```{python}
+posterior_samples = {
+    "elo_rating": idata.posterior["elo_rating"]
+    .stack(samples=("chain", "draw"))
+    .values.T,
+    "home_adv": idata.posterior["home_adv"].stack(samples=("chain", "draw")).values,
+    "K": idata.posterior["K"].stack(samples=("chain", "draw")).values,
+}
+
+final_ratings, rating_changes = compute_elo_updates_vectorized(
+    posterior_samples, HOME_TEAM_IDX, AWAY_TEAM_IDX, df["outcome"].values, N_TEAMS
+)
+
+```
+
+
+```{python}
+df_elo = pd.DataFrame(final_ratings)
+df_elo.columns = TEAM_NAME
+df_elo = df_elo.melt(var_name="team_name", value_name="elo_rating")
+df_elo["elo_regularized"] = df_elo["elo_rating"] * 0.5 + 1500 * 0.5
+# (
+#     ggplot(df_elo, aes("elo_rating", color="factor(team_name)"))
+#     + geom_density()
+#     + facet_wrap("team_name", ncol=1)
+# )
+
+d = (
+    df_elo.groupby("team_name", as_index=False)
+    .agg(
+        elo_mean=("elo_rating", "mean"),
+        hdi_3=("elo_rating", lambda x: np.quantile(x, 0.06)),
+        hdi_97=("elo_rating", lambda x: np.quantile(x, 0.94)),
+    )
+    .sort_values("elo_mean")
+)
+
+team_name_order = d["team_name"].to_list()
+team_name_cat = pd.Categorical(d["team_name"], categories=team_name_order)
+d["team_name_cat"] = team_name_cat
+
+(
+    ggplot(data=d)
+    + geom_pointrange(aes(y="elo_mean", x="team_name_cat", ymin="hdi_3", ymax="hdi_97"))
+    + coord_flip()
+)
+
+
+
+```
+
+```
+d25 = d.sort_values("elo_mean")
+
+team_name_order = d25["team_name"].to_list()
+team_name_cat = pd.Categorical(d25["team_name"], categories=team_name_order)
+d25["team_name_cat"] = team_name_cat
+
+(
+    ggplot(data=d25)
+    + geom_pointrange(aes(y="elo_mean", x="team_name_cat", ymin="hdi_3", ymax="hdi_97"))
+    + coord_flip()
+)
+
+
+pd.concat([d24.assign(year="2024"), d25.assign(year="2025")])
+(
+    ggplot(
+        pd.concat([d24.assign(year="2024"), d25.assign(year="2025")]),
+        aes(
+            y="elo_mean",
+            x="team_name_cat",
+            color="factor(year)",
+            ymin="hdi_3",
+            ymax="hdi_97",
+        ),
+    )
+    + geom_pointrange()
+    + position_stack()
+    + coord_flip()
+)
+(
+    ggplot()
+    + geom_pointrange(
+        aes(y="elo_mean", x="team_name_cat", ymin="hdi_3", ymax="hdi_97"), data=d24
+    )
+    + geom_pointrange(
+        aes(y="elo_mean", x="team_name_cat", ymin="hdi_3", ymax="hdi_97"), data=d25
+    )
+    + coord_flip()
+)
+```
